@@ -895,6 +895,18 @@ func filterRelevantDetailed(results []newznab.SearchResult, title, author string
 	fullIdentityElided := titleIdentityWords(newznab.ElideApostrophes(title))
 	primaryIdentityElided := titleIdentityWords(newznab.ElideApostrophes(primaryTitle(title)))
 	authorKws := newznab.SigWords(author)
+	// A "Series N: Title" name also gets the book's own title as a reading,
+	// because releases name the book, not its series position ("The Mining
+	// Company Contract" for "Feral Mage 4: The Mining Company Contract"). It
+	// needs two significant words so a one word title cannot turn the author's
+	// whole catalogue into matches, and it is tried only after the full and
+	// primary readings both fail. See newznab.SeriesPositionTitle.
+	seriesTitle := newznab.SeriesPositionTitle(title)
+	seriesKws := newznab.SigWords(seriesTitle)
+	if len(seriesKws) < 2 || sameKws(seriesKws, fullKws) || sameKws(seriesKws, primaryKws) {
+		seriesTitle, seriesKws = "", nil
+	}
+	seriesIdentity := titleIdentityWords(seriesTitle)
 
 	authorTokenSets := latinAliasTokenSets(author, aliases)
 
@@ -951,7 +963,8 @@ func filterRelevantDetailed(results []newznab.SearchResult, title, author string
 	for i, r := range results {
 		n := normTitles[i]
 		if conflictingTitleAuthor(r.Title, title, authorTokenSets) ||
-			conflictingTitleAuthor(r.Title, primaryTitle(title), authorTokenSets) {
+			conflictingTitleAuthor(r.Title, primaryTitle(title), authorTokenSets) ||
+			(seriesTitle != "" && conflictingTitleAuthor(r.Title, seriesTitle, authorTokenSets)) {
 			dropped = append(dropped, drop(r, "release names a different author for this title"))
 			continue
 		}
@@ -972,12 +985,19 @@ func filterRelevantDetailed(results []newznab.SearchResult, title, author string
 				identityOK(identity, primaryIdentity, primaryIdentityElided) &&
 				volumeNumberAgrees(n, primaryTitle(title))
 		}
-		if fullOK || primaryOK {
+		seriesKeywords, seriesOK := false, false
+		if !fullOK && !primaryOK && len(seriesKws) > 0 {
+			seriesKeywords = tryMatch(n, seriesKws)
+			seriesOK = seriesKeywords &&
+				(len(seriesIdentity) < 2 || ContainsPhrase(identity, seriesIdentity)) &&
+				volumeNumberAgrees(n, seriesTitle)
+		}
+		if fullOK || primaryOK || seriesOK {
 			filtered = append(filtered, r)
 			continue
 		}
 		reason := "title/author keywords did not match release name"
-		if fullKeywords || primaryKeywords {
+		if fullKeywords || primaryKeywords || seriesKeywords {
 			// The keywords are all there but the release's title is not this
 			// one: other words sit between them, as "12 Rules for Life" inside
 			// "12 More Rules for Life", or a number differs, as "Volume 16"
