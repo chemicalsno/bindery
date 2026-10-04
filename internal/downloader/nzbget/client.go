@@ -73,19 +73,21 @@ func New(host string, port int, username, password, urlBase string, useSSL bool)
 	if useSSL {
 		scheme = "https"
 	}
-	return &Client{
+	c := &Client{
 		baseURL:  fmt.Sprintf("%s://%s%s/jsonrpc", scheme, clienthost.Authority(host, port), urlbase.Normalize(urlBase)),
 		username: username,
 		password: password,
 		http:     &http.Client{Timeout: 15 * time.Second},
-		// fetchHTTP pulls indexer-controlled NZB URLs, so guard the dial: it
-		// re-validates the resolved IP on every connect (DNS-rebind) and
-		// rejects a redirect to a forbidden host at dial time.
-		fetchHTTP: &http.Client{Timeout: 60 * time.Second, Transport: httpsec.GuardedTransport(httpsec.DownloadFetchPolicy())},
 		validateNZBURL: func(raw string) error {
 			return httpsec.ValidateOutboundURL(raw, httpsec.DownloadFetchPolicy())
 		},
 	}
+	// fetchHTTP pulls indexer-controlled NZB URLs: the dial is guarded (DNS
+	// rebind), every redirect hop is re-validated, and no hop carries a
+	// Referer or the original headers to another host. The method value reads
+	// c.validateNZBURL at call time, so a test override applies to hops too.
+	c.fetchHTTP = nzbfetch.NewHTTPClient(c.validateNZBFetchURL)
+	return c
 }
 
 // Test verifies connectivity by calling the "version" RPC method.
@@ -333,11 +335,11 @@ func (c *Client) validateNZBFetchURL(raw string) error {
 
 func (c *Client) fetchNZBContent(ctx context.Context, nzbURL string) ([]byte, error) {
 	if err := c.validateNZBFetchURL(nzbURL); err != nil {
-		return nil, fmt.Errorf("fetch nzb: %w", err)
+		return nil, fmt.Errorf("fetch nzb: %w", httpsec.RedactURLError(err))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nzbURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fetch nzb: %w", err)
+		return nil, fmt.Errorf("fetch nzb: %w", httpsec.RedactURLError(err))
 	}
 	// Some indexers (e.g. nzbfinder.ws, #1053) fingerprint the User-Agent and
 	// serve an anti-bot 403 to Go's default UA, so use the project UA the

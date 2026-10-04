@@ -28,9 +28,17 @@ import (
 // title and size replace the posted ones for admins and API key callers too,
 // so search responses can drop every secret from the URL (an indexer apikey, a
 // Jackett key, a tracker passkey) and the grab still sends the real values.
-// An admin or API key grab of a GUID the registry does not hold (a restart,
-// an eviction, a result older than the TTL, or a release found elsewhere)
-// falls back to the posted URL. See callerMayGrabAnyURL.
+// Only an API key grab of a GUID the registry does not hold (a restart, an
+// eviction, a result older than the TTL, or a release found elsewhere) falls
+// back to the posted URL; anyone else is told to search again. See
+// callerMayPostDownloadURL.
+//
+// Entries are keyed by the GUID as the search response shows it, which is the
+// raw GUID with every credential stripped (registryKey): a torznab GUID is
+// often the download URL itself, so the response redacts it, and the grab
+// posts that redacted form back. The entry keeps the raw GUID, and apply puts
+// it back on the request so the download row, its de-duplication and the
+// blocklist see the same GUID a scheduler grab would store.
 //
 // Entries are keyed by GUID alone. The searcher already de-duplicates results
 // by GUID, and whichever search recorded an entry last, the URL in it is one an
@@ -55,6 +63,7 @@ type SearchResultRegistry struct {
 // searchRelease is what a non-admin grab takes from the server rather than
 // from the request.
 type searchRelease struct {
+	GUID      string // raw, as the indexer returned it: may carry credentials
 	NZBURL    string // raw, as the indexer returned it: may carry credentials
 	Title     string
 	Size      int64
@@ -107,8 +116,10 @@ func (r *SearchResultRegistry) remember(results []newznab.SearchResult) {
 		if res.GUID == "" {
 			continue
 		}
+		key := registryKey(res.GUID)
 		r.seq++
-		r.entries[res.GUID] = searchRelease{
+		r.entries[key] = searchRelease{
+			GUID:      res.GUID,
 			NZBURL:    res.NZBURL,
 			Title:     res.Title,
 			Size:      res.Size,
@@ -117,7 +128,7 @@ func (r *SearchResultRegistry) remember(results []newznab.SearchResult) {
 			seq:       r.seq,
 			at:        now,
 		}
-		r.order = append(r.order, searchReleaseRecord{guid: res.GUID, seq: r.seq})
+		r.order = append(r.order, searchReleaseRecord{guid: key, seq: r.seq})
 	}
 	r.trimLocked(now)
 }
@@ -166,7 +177,7 @@ func (r *SearchResultRegistry) lookup(guid string) (searchRelease, bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e, ok := r.entries[guid]
+	e, ok := r.entries[registryKey(guid)]
 	if !ok || r.now().Sub(e.at) > r.ttl {
 		return searchRelease{}, false
 	}
@@ -177,6 +188,7 @@ func (r *SearchResultRegistry) lookup(guid string) (searchRelease, bool) {
 // MediaType stay the caller's: they say where the release goes, not what it
 // is, and grab() checks the book's ownership.
 func (e searchRelease) apply(req *grabRequest) {
+	req.GUID = e.GUID
 	req.NZBURL = e.NZBURL
 	req.Title = e.Title
 	req.Size = e.Size
@@ -188,18 +200,22 @@ func (e searchRelease) apply(req *grabRequest) {
 	}
 }
 
-// callerMayGrabAnyURL reports whether a grab request may name its own download
-// URL. True for the admin role, which API key, disabled mode and trusted local
-// requests also carry, and for a context with no identity at all, which only
-// code outside the auth middleware builds (CheckOwnership treats that the same
-// way). Everyone else, including a signed in user whose role could not be
-// read, grabs only what a search returned.
-func callerMayGrabAnyURL(ctx context.Context) bool {
-	role := auth.UserRoleFromContext(ctx)
-	if role == auth.RoleAdmin {
+// callerMayPostDownloadURL reports whether a grab of a GUID the registry does
+// not hold may use the download URL the request carries. True only for a
+// verified API key, which external tools use with the raw URLs they hold, and
+// for a context with no identity at all, which only code outside the auth
+// middleware builds (CheckOwnership treats that the same way).
+//
+// Everyone else, admin sessions included, grabs only what a search returned.
+// A user account must not make Bindery fetch a URL of its choosing, and a
+// browser admin posts back what a search response showed: with its
+// credentials stripped, so the grab would go out without its Jackett key or
+// passkey and store a redacted GUID.
+func callerMayPostDownloadURL(ctx context.Context) bool {
+	if auth.AuthedViaAPIKey(ctx) {
 		return true
 	}
-	return role == "" && auth.UserIDFromContext(ctx) == 0
+	return auth.UserRoleFromContext(ctx) == "" && auth.UserIDFromContext(ctx) == 0
 }
 
 // WithSearchResults attaches the registry non-admin grabs are checked against.
@@ -213,4 +229,21 @@ func (h *QueueHandler) WithSearchResults(reg *SearchResultRegistry) *QueueHandle
 func (h *IndexerHandler) WithSearchResults(reg *SearchResultRegistry) *IndexerHandler {
 	h.searchResults = reg
 	return h
+}
+
+// registryKey is the GUID as a search response shows it: credentials stripped.
+// Raw and redacted forms of one GUID map to the same key, so a grab posting
+// either finds the entry.
+func registryKey(guid string) string {
+	return newznab.RedactDownloadURL(guid)
+}
+
+// redactSearchResult strips every credential from the URL-shaped fields of a
+// search result before it goes into a response: the download URL, the GUID
+// (torznab feeds often use the download URL as the GUID) and the detail link.
+// The registry must record the result first; see SearchResultRegistry.
+func redactSearchResult(res *newznab.SearchResult) {
+	res.NZBURL = newznab.RedactDownloadURL(res.NZBURL)
+	res.GUID = newznab.RedactDownloadURL(res.GUID)
+	res.InfoURL = newznab.RedactDownloadURL(res.InfoURL)
 }
