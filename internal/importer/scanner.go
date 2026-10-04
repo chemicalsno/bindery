@@ -3499,6 +3499,14 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 	// from it before the file's own title (see libraryVolumeConflict). Set per
 	// file in the loop below.
 	var fileLayoutTitle string
+	// fileTooSmall is set per file when it is an ebook format file too small
+	// to be a book (#2944). Every tier still runs its claim check, so a
+	// notes .txt whose book a real container already claimed is recognised
+	// as that container's sidecar (#2188), but no tier attaches it: the gate
+	// sits after the claim check and before AddBookFile. A 1 KB notes file
+	// reconciled onto a Wanted book flipped it to Imported and the real
+	// ebook was never searched for.
+	var fileTooSmall bool
 	tryReconcileTitle := func(sb *scanBook, path, cleanPath, title, normParsed, detectedFmt string) bool {
 		b := sb.book
 		// Length gate: Jaro-Winkler is bounded above by 0.8 + 0.2·(minLen/
@@ -3546,6 +3554,11 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 		if !pathUnderDir(path, effDir) {
 			slog.Debug("library scan: title+author match rejected (outside library root)",
 				"title", b.Title, "path", path, "root", effDir)
+			return false
+		}
+		if fileTooSmall {
+			slog.Debug("library scan: title+author match rejected (too small to be a book)",
+				"title", b.Title, "path", path)
 			return false
 		}
 		if err := s.books.AddBookFile(ctx, b.ID, detectedFmt, registeredPath); err != nil {
@@ -3606,6 +3619,7 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 		cleanPath := filepath.Clean(path)
 		detectedFmt := detectDownloadFormat([]string{path})
 		claimBlocked = false
+		fileTooSmall = TooSmallToBeABook(path, walked[path].size)
 		// What the file is recorded as in book_files once it reconciles: an
 		// audiobook inside a book folder of its own is the folder, not the
 		// track that matched (see reconciledAudiobookPath). Decided before the
@@ -3758,6 +3772,9 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 						"asin", parsed.ASIN, "path", path, "root", effDir)
 					continue
 				}
+				if fileTooSmall {
+					continue
+				}
 				if err := s.books.AddBookFile(ctx, b.ID, detectedFmt, registeredPath); err != nil {
 					slog.Error("library scan: failed to update book", "id", b.ID, "error", err)
 					continue
@@ -3814,7 +3831,7 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 				claimBlocked = true
 			} else if book != nil {
 				effDir := s.effectiveRootForFormat(ctx, authorMap[book.AuthorID], detectedFmt)
-				if pathUnderDir(path, effDir) {
+				if pathUnderDir(path, effDir) && !fileTooSmall {
 					if err := s.books.AddBookFile(ctx, book.ID, detectedFmt, registeredPath); err != nil {
 						slog.Error("library scan: failed to update book via series match", "id", book.ID, "error", err)
 					} else {
@@ -3872,6 +3889,12 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 						reason = unmatchedReasonNoCandidateBooks
 					}
 				}
+			}
+			// A file too small to be a book is labelled as such whatever else
+			// is true of it, so the list does not present it as a book that
+			// merely failed to match (#2944).
+			if fileTooSmall {
+				reason = unmatchedReasonTooSmall
 			}
 			// matchAuthor is the author string the matcher actually used — it
 			// differs from parsedAuthor when a #1956 fallback fired, which is
@@ -4083,6 +4106,11 @@ const (
 	// book by that author matched this title" when there was no title to match
 	// — the file needs renaming, not a catalogue refresh.
 	unmatchedReasonNoTitleParsed = "no_title_parsed"
+	// unmatchedReasonTooSmall: an ebook format file under
+	// MinPlausibleEbookBytes, a notes or readme file rather than a book
+	// (#2944). It is listed so the user can see and ignore it, but it gets no
+	// suggestions, its own row, and adoption refuses it.
+	unmatchedReasonTooSmall = "too_small"
 )
 
 // writeScanError persists a failed-scan result so the UI reflects the failure
