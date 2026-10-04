@@ -18,8 +18,9 @@ docker run -d \
 
 | Tag | Meaning |
 |-----|---------|
-| `:latest` | Most recent tagged release |
+| `:latest` | Most recent tagged release. Moves when a `v*` release tag is pushed and its image is built, never on a merge to `main`. It is pushed as soon as the tag's image builds, before the release smoke test and binary build finish, so pin `:X.Y.Z` if you want a release that has cleared every step |
 | `:X.Y.Z` / `:vX.Y.Z` | Specific release, both spellings are published. The Helm chart pins the un-prefixed form |
+| `:edge` | Head of `main`, rebuilt on every merge. Unreleased: it has passed CI but not the release gates |
 | `:development` | Bleeding edge from the `development` branch |
 | `:sha-<hash>` | Per-commit image, published for every branch and tag build. Pin for rollback |
 
@@ -108,6 +109,14 @@ Pre-built archives are attached to every [Release](https://github.com/vavallee/b
 | Windows | amd64, arm64 | x86_64 desktops, Windows on ARM |
 
 Pick the archive matching your platform, verify against `bindery_<version>_checksums.txt`, extract, and run.
+
+From the first release after v1.40.0, every archive and the checksums file also carry a signed [SLSA build provenance](https://slsa.dev/spec/v1.0/provenance) attestation, the same kind the container image has. A checksum only proves the file matches the list next to it; the attestation proves the file was built by this repository's release workflow from the tagged commit. With the GitHub CLI:
+
+```bash
+gh attestation verify bindery_<version>_linux_amd64.tar.gz --repo vavallee/bindery
+```
+
+Each archive also has an SPDX SBOM (`<archive>.sbom.spdx.json`) beside it on the release.
 
 Each archive also carries `LICENSE` and `THIRD_PARTY_LICENSES.md` — the licenses
 and NOTICE files of everything statically linked into the binary and embedded in
