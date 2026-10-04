@@ -72,6 +72,9 @@ type IndexerHandler struct {
 	// ISBN exact-match bonus in the ranker (#1724).
 	editions  *db.EditionRepo
 	lastDebug *lastDebugStore
+	// searchResults records what the search endpoints return, so a grab from
+	// a non-admin account can be held to it. See SearchResultRegistry.
+	searchResults *SearchResultRegistry
 }
 
 func NewIndexerHandler(indexers *db.IndexerRepo, books *db.BookRepo, authors *db.AuthorRepo, profiles *db.MetadataProfileRepo, searcher indexerSearcher, settings *db.SettingsRepo, blocklist *db.BlocklistRepo) *IndexerHandler {
@@ -746,6 +749,11 @@ func (h *IndexerHandler) SearchBook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Every result is grabbable, approved or not: a rejection only labels it.
+	// The registry keeps the raw URL, before the redaction above, so a grab
+	// never depends on the URL the client posts back.
+	h.searchResults.remember(results)
+
 	// Remember the most recent debug payload so the UI can re-fetch it
 	// (e.g. after a page reload) without having to re-run the search.
 	if dbg != nil {
@@ -804,6 +812,8 @@ func (h *IndexerHandler) SearchQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := h.searcher.SearchQuery(r.Context(), idxs, query)
+	// Recorded raw, before the redaction below: see SearchBook.
+	h.searchResults.remember(results)
 	// Strip the indexer apikey from each download URL before returning to the
 	// client; the grab handler re-signs server-side (see SearchBook).
 	for i := range results {
