@@ -1780,6 +1780,20 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 				audiobookSource = src
 			}
 		}
+		// A download folder that is itself a symlink is refused in every
+		// mode: moving it would place the link, and copying or hardlinking
+		// through it would import whatever it names. A torrent client's file
+		// list reaches through such a link even though a plain walk would
+		// not. Per-file placement is left alone: there audiobookSource is the
+		// client's shared save path, which an operator may well reach
+		// through a link of their own.
+		if !usePerFile {
+			if err := refuseSymlinkedDownloadDir(audiobookSource); err != nil {
+				slog.Error("refusing audiobook import from a symlinked download folder", "path", audiobookSource, "mode", mode)
+				s.failImport(ctx, dl, models.StateImportBlocked, fmt.Sprintf("audiobook %s refused: %v", mode, err))
+				return
+			}
+		}
 		slog.Info("importing audiobook folder", "src", audiobookSource, "dst", destDir, "mode", mode, "perFile", usePerFile)
 		// Single-file audiobook releases (e.g. a lone .m4b from a torrent) give
 		// us a file path rather than a folder. MoveDir/CopyDir/HardlinkDir all
@@ -1969,7 +1983,7 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 					case "copy":
 						dirErr = CopyDirCtx(importCtx, audiobookSource, destDir)
 					default:
-						dirErr = MoveDirCtx(importCtx, audiobookSource, destDir)
+						dirErr = MoveDownloadDirCtx(importCtx, audiobookSource, destDir)
 					}
 				}
 			} else {
@@ -3172,6 +3186,15 @@ func (s *Scanner) scanLibrary(ctx context.Context) {
 		var files []string
 		if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
+				return nil
+			}
+			// filepath.Walk Lstats, so a symlink shows up here as itself.
+			// Only regular files are book files: a link (planted by a
+			// download, or pointing anywhere on the host) must never be
+			// reconciled onto a book and then served as that book's file.
+			// The Unmatched list already dropped links by mode
+			// (eligibleUnmatched); this keeps the reconcile pass in step.
+			if !info.Mode().IsRegular() {
 				return nil
 			}
 			if IsBookFile(path) {
