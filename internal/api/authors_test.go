@@ -9648,3 +9648,188 @@ func TestAuthorRefresh_RefusesSecondRefreshWhileSyncRuns(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// editingEditionsMetaProvider runs edit once, while it handles the first
+// edition lookup for editForeignID: a user change committed after the
+// catalogue sync read the author's books and before it writes one (#2926).
+type editingEditionsMetaProvider struct {
+	stubMetaProvider
+	editForeignID string
+	once          sync.Once
+	edit          func()
+}
+
+func (p *editingEditionsMetaProvider) GetEditions(ctx context.Context, fid string) ([]models.Edition, error) {
+	if fid == p.editForeignID && p.edit != nil {
+		p.once.Do(p.edit)
+	}
+	return p.stubMetaProvider.GetEditions(ctx, fid)
+}
+
+// TestRefreshAuthorBooks_TitleMatchKeepsEditMadeDuringSync covers #2926 for
+// the catalogue sync's title match branch. The rows it updates are read when
+// the sync starts, and provider calls (here the MinPages edition prefetch)
+// run before the write, so writing that snapshot back undid an edit saved in
+// between. The calibre stub upgrade must land on top of the edit instead.
+func TestRefreshAuthorBooks_TitleMatchKeepsEditMadeDuringSync(t *testing.T) {
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	profileRepo := db.NewMetadataProfileRepo(database)
+	ctx := context.Background()
+
+	profile, err := profileRepo.GetByID(ctx, models.DefaultMetadataProfileID)
+	if err != nil || profile == nil {
+		t.Fatalf("GetByID(default profile) failed: %v", err)
+	}
+	profile.MinPages = 50
+	if err := profileRepo.Update(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	author := &models.Author{
+		ForeignID: "OL-RACE-AUTHOR", Name: "Race Author", SortName: "Author, Race",
+		MetadataProvider: "openlibrary", Monitored: true,
+		MonitorMode: models.AuthorMonitorModeAll, MonitorNewItems: models.AuthorMonitorNewItemsAll,
+	}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+	stub := &models.Book{
+		ForeignID: "calibre:book:41", AuthorID: author.ID, Title: "Race Title",
+		SortTitle: "race title", Status: models.BookStatusWanted, Monitored: true,
+		Genres: []string{}, MetadataProvider: "calibre",
+	}
+	if err := bookRepo.Create(ctx, stub); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &editingEditionsMetaProvider{
+		stubMetaProvider: stubMetaProvider{name: "openlibrary", works: []models.Book{{
+			ForeignID: "OL-RACE-W", Title: "Race Title", SortTitle: "race title", Language: "eng",
+			RatingsCount: 50, AverageRating: 4.2, Status: models.BookStatusWanted,
+			Genres: []string{}, MetadataProvider: "openlibrary",
+		}}},
+		editForeignID: "OL-RACE-W",
+	}
+	provider.edit = func() {
+		current, err := bookRepo.GetByID(ctx, stub.ID)
+		if err != nil || current == nil {
+			t.Errorf("load book for concurrent edit: %v", err)
+			return
+		}
+		current.Monitored = false
+		current.ImageURL = "/covers/user-choice.jpg"
+		if err := bookRepo.Update(ctx, current); err != nil {
+			t.Errorf("concurrent edit: %v", err)
+		}
+	}
+
+	h := NewAuthorHandler(authorRepo, nil, bookRepo, nil,
+		metadata.NewAggregator(provider), nil, profileRepo, &searcherSpy{})
+	h.RefreshAuthorBooks(author, false, "")
+
+	provider.editionCallsMu.Lock()
+	calls := len(provider.editionCalls)
+	provider.editionCallsMu.Unlock()
+	if calls == 0 {
+		t.Fatal("the edition prefetch never ran, so nothing raced the write")
+	}
+	stored, err := bookRepo.GetByID(ctx, stub.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("reload book: %v", err)
+	}
+	if stored.Monitored || stored.ImageURL != "/covers/user-choice.jpg" {
+		t.Fatalf("edit made during the sync was overwritten: monitored=%v image=%q", stored.Monitored, stored.ImageURL)
+	}
+	if stored.ForeignID != "OL-RACE-W" || stored.RatingsCount != 50 || stored.Language != "eng" {
+		t.Fatalf("calibre stub upgrade not applied on top of the edit: foreignID=%q ratings=%d language=%q",
+			stored.ForeignID, stored.RatingsCount, stored.Language)
+	}
+}
+
+// TestRefreshAuthorBooks_LostTitleMatchIsRetriedNextSync: when the guarded
+// write of a calibre stub upgrade loses, the sync must not record the work's
+// ids against the stub. Recorded ids would send the next sync down the id
+// branch, which never relinks a stub, so the upgrade would never happen. A
+// trigger that silently ignores the relink stands in for an edit landing
+// between the re-read and the write.
+func TestRefreshAuthorBooks_LostTitleMatchIsRetriedNextSync(t *testing.T) {
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	profileRepo := db.NewMetadataProfileRepo(database)
+	ctx := context.Background()
+
+	author := &models.Author{
+		ForeignID: "OL-RETRY-AUTHOR", Name: "Retry Author", SortName: "Author, Retry",
+		MetadataProvider: "openlibrary", Monitored: true,
+		MonitorMode: models.AuthorMonitorModeAll, MonitorNewItems: models.AuthorMonitorNewItemsAll,
+	}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+	stub := &models.Book{
+		ForeignID: "calibre:book:77", AuthorID: author.ID, Title: "Retry Title",
+		SortTitle: "retry title", Status: models.BookStatusWanted, Monitored: true,
+		Genres: []string{}, MetadataProvider: "calibre",
+	}
+	if err := bookRepo.Create(ctx, stub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+		CREATE TRIGGER test_ignore_stub_upgrade BEFORE UPDATE OF foreign_id ON books
+		WHEN NEW.foreign_id = 'OL-RETRY-W'
+		BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	works := []models.Book{{
+		ForeignID: "OL-RETRY-W", Title: "Retry Title", SortTitle: "retry title", Language: "eng",
+		Status: models.BookStatusWanted, Genres: []string{}, MetadataProvider: "openlibrary",
+	}}
+	h := NewAuthorHandler(authorRepo, nil, bookRepo, nil,
+		metadata.NewAggregator(&stubMetaProvider{name: "openlibrary", works: works}), nil, profileRepo, &searcherSpy{})
+	h.RefreshAuthorBooks(author, false, "")
+
+	stored, err := bookRepo.GetByID(ctx, stub.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("reload book: %v", err)
+	}
+	if stored.ForeignID != "calibre:book:77" {
+		t.Fatalf("the trigger should have made the first upgrade lose, foreignID=%q", stored.ForeignID)
+	}
+	if ident, err := bookRepo.GetBookIdentifier(ctx, "OL-RETRY-W"); err != nil || ident != nil {
+		t.Errorf("work ids recorded against a stub whose upgrade did not land: %+v err=%v", ident, err)
+	}
+
+	if _, err := database.ExecContext(ctx, `DROP TRIGGER test_ignore_stub_upgrade`); err != nil {
+		t.Fatal(err)
+	}
+	h.RefreshAuthorBooks(author, false, "")
+
+	stored, err = bookRepo.GetByID(ctx, stub.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("reload book: %v", err)
+	}
+	if stored.ForeignID != "OL-RETRY-W" {
+		t.Fatalf("second sync did not perform the upgrade: foreignID=%q", stored.ForeignID)
+	}
+	books, err := bookRepo.ListByAuthor(ctx, author.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("want the one upgraded row, got %d: %v", len(books), bookTitles(books))
+	}
+}
