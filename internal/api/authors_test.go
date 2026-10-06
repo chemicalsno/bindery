@@ -7583,6 +7583,177 @@ func TestFetchAuthorBooks_UsesOneLibrarySnapshotForTheLoop(t *testing.T) {
 	}
 }
 
+// TestFetchAuthorBooks_FileGoesToExactTitleNotShorterBook is #2941 on the add
+// author path. The library holds one untracked epub titled exactly as one of
+// the author's books; a second book, "Harry Potter", is created first and its
+// title also clears FindExisting's word match. It used to take the file, skip
+// its search, and leave the exact book unbound because the file was by then
+// owned. The file must go to the exact title and the shorter book stay
+// without one.
+func TestFetchAuthorBooks_FileGoesToExactTitleNotShorterBook(t *testing.T) {
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+
+	libDir := t.TempDir()
+	dutchPath := filepath.Join(libDir, "J. K. Rowling", "Harry Potter en het vervloekte kind (2016)", "Harry Potter en het vervloekte kind - J. K. Rowling.epub")
+	if err := os.MkdirAll(filepath.Dir(dutchPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dutchPath, bytes.Repeat([]byte("x"), int(importer.MinPlausibleEbookBytes)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	profileRepo := db.NewMetadataProfileRepo(database)
+
+	ctx := context.Background()
+	author := &models.Author{
+		ForeignID: "OL910A", Name: "J. K. Rowling", SortName: "Rowling, J. K.",
+		MetadataProvider: "openlibrary", Monitored: false,
+	}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &stubMetaProvider{
+		works: []models.Book{
+			{ForeignID: "OL911W", Title: "Harry Potter", SortTitle: "harry potter", Language: "eng", Status: models.BookStatusWanted, Genres: []string{}, MetadataProvider: "openlibrary", MediaType: models.MediaTypeBoth},
+			{ForeignID: "OL912W", Title: "Harry Potter en het vervloekte kind", SortTitle: "harry potter en het vervloekte kind", Language: "eng", Status: models.BookStatusWanted, Genres: []string{}, MetadataProvider: "openlibrary", MediaType: models.MediaTypeBoth},
+		},
+	}
+	h := NewAuthorHandler(authorRepo, nil, bookRepo, nil, metadata.NewAggregator(stub), nil, profileRepo, nil).
+		WithFinder(importer.NewLibrarySnapshot(libDir, ""))
+
+	h.FetchAuthorBooks(author, false, "")
+
+	short, err := bookRepo.GetByForeignID(ctx, "OL911W")
+	if err != nil || short == nil {
+		t.Fatalf("Harry Potter not created: err=%v", err)
+	}
+	exact, err := bookRepo.GetByForeignID(ctx, "OL912W")
+	if err != nil || exact == nil {
+		t.Fatalf("Harry Potter en het vervloekte kind not created: err=%v", err)
+	}
+	if short.FilePath != "" {
+		t.Errorf("%q took %q, which is titled exactly as another book of the author", short.Title, short.FilePath)
+	}
+	if exact.FilePath != dutchPath {
+		t.Errorf("%q file path = %q, want %q", exact.Title, exact.FilePath, dutchPath)
+	}
+}
+
+// TestHandleNewWantedBook_ExcludedRowDoesNotBlockBind: a row the user
+// excluded is out of the catalogue, so its title must not withdraw a file
+// from the book they kept. An excluded "Project Hail Mary" duplicate would
+// otherwise keep "Project Hail Mary.epub" from "Project Hail Mary: A Novel"
+// forever, and the owned book would be downloaded again (#2941 review).
+func TestHandleNewWantedBook_ExcludedRowDoesNotBlockBind(t *testing.T) {
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	ctx := context.Background()
+
+	libDir := t.TempDir()
+	path := filepath.Join(libDir, "Andy Weir", "Project Hail Mary.epub")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), int(importer.MinPlausibleEbookBytes)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	author := &models.Author{ForeignID: "OL920A", Name: "Andy Weir", SortName: "Weir, Andy"}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+	dup := &models.Book{ForeignID: "OL921W", AuthorID: author.ID, Title: "Project Hail Mary",
+		Status: models.BookStatusWanted, MediaType: models.MediaTypeEbook, Genres: []string{}}
+	if err := bookRepo.Create(ctx, dup); err != nil {
+		t.Fatal(err)
+	}
+	if err := bookRepo.SetExcluded(ctx, dup.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	book := &models.Book{ForeignID: "OL922W", AuthorID: author.ID, Title: "Project Hail Mary: A Novel",
+		Status: models.BookStatusWanted, MediaType: models.MediaTypeEbook, Genres: []string{}}
+	if err := bookRepo.Create(ctx, book); err != nil {
+		t.Fatal(err)
+	}
+
+	if !handleNewWantedBook(ctx, bookRepo, nil, importer.NewLibrarySnapshot(libDir, ""), *book, author.Name) {
+		t.Fatalf("%q was not bound to %q: the excluded %q row withdrew it", book.Title, path, dup.Title)
+	}
+	got, err := bookRepo.GetByID(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FilePath != path {
+		t.Errorf("file path = %q, want %q", got.FilePath, path)
+	}
+}
+
+// TestHandleNewWantedBook_RivalFileStepsAside is the add path half of the
+// rival drop: "The Way of Kings Prime.epub" belongs to the catalogue book of
+// that title, so "The Way of Kings" must still find its own file beside it
+// rather than nothing.
+func TestHandleNewWantedBook_RivalFileStepsAside(t *testing.T) {
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	ctx := context.Background()
+
+	libDir := t.TempDir()
+	dir := filepath.Join(libDir, "Brandon Sanderson")
+	own := filepath.Join(dir, "Stormlight Archive The Way of Kings - Brandon Sanderson.epub")
+	for _, p := range []string{own, filepath.Join(dir, "The Way of Kings Prime - Brandon Sanderson.epub")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, bytes.Repeat([]byte("x"), int(importer.MinPlausibleEbookBytes)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	author := &models.Author{ForeignID: "OL930A", Name: "Brandon Sanderson", SortName: "Sanderson, Brandon"}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+	prime := &models.Book{ForeignID: "OL931W", AuthorID: author.ID, Title: "The Way of Kings Prime",
+		Status: models.BookStatusWanted, MediaType: models.MediaTypeEbook, Genres: []string{}}
+	if err := bookRepo.Create(ctx, prime); err != nil {
+		t.Fatal(err)
+	}
+	book := &models.Book{ForeignID: "OL932W", AuthorID: author.ID, Title: "The Way of Kings",
+		Status: models.BookStatusWanted, MediaType: models.MediaTypeEbook, Genres: []string{}}
+	if err := bookRepo.Create(ctx, book); err != nil {
+		t.Fatal(err)
+	}
+
+	if !handleNewWantedBook(ctx, bookRepo, nil, importer.NewLibrarySnapshot(libDir, ""), *book, author.Name) {
+		t.Fatalf("%q was not bound to its own file %q", book.Title, own)
+	}
+	got, err := bookRepo.GetByID(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FilePath != own {
+		t.Errorf("file path = %q, want %q", got.FilePath, own)
+	}
+}
+
 // intPtr is strPtr's counterpart (queue_test.go) for the *int fields on
 // models.Edition.
 func intPtr(v int) *int { return &v }

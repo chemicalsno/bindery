@@ -2713,6 +2713,11 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 	}
 	editionCache := h.prefetchHardcoverEditions(ctx, createdTargets, seededEditions)
 
+	// The author's catalogue as this sync leaves it, for the rival title
+	// check (#2941): read once here instead of once per bound book.
+	authorCatalogue := make([]models.Book, 0, len(allBooks)+len(createdBooks))
+	authorCatalogue = append(authorCatalogue, allBooks...)
+	authorCatalogue = append(authorCatalogue, createdBooks...)
 	for i := range createdBooks {
 		b := createdBooks[i]
 		// Order within a book is unchanged: hydration can widen MediaType and
@@ -2722,7 +2727,7 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 		// widening stays available (#2768).
 		h.hydrateHardcoverEditions(ctx, &b, editionCache, false)
 
-		if fileFound := handleNewWantedBook(ctx, h.books, h.series, finder, b, author.Name); fileFound {
+		if fileFound := handleNewWantedBookAmong(ctx, h.books, h.series, finder, b, author.Name, authorCatalogue); fileFound {
 			continue // don't auto-search for a book we already have
 		}
 
@@ -2891,6 +2896,14 @@ func (h *AuthorHandler) reparentMisattachedBook(ctx context.Context, existing *m
 // Returns true when an existing file was found (caller must NOT auto-search),
 // false otherwise.
 func handleNewWantedBook(ctx context.Context, books *db.BookRepo, series *db.SeriesRepo, finder LibraryFinder, book models.Book, authorName string) (fileFound bool) {
+	return handleNewWantedBookAmong(ctx, books, series, finder, book, authorName, nil)
+}
+
+// handleNewWantedBookAmong is handleNewWantedBook for a caller that already
+// holds the author's catalogue, passed as siblings so the rival title check
+// (#2941) does not list the author again for every book. nil siblings reads
+// them from books.
+func handleNewWantedBookAmong(ctx context.Context, books *db.BookRepo, series *db.SeriesRepo, finder LibraryFinder, book models.Book, authorName string, siblings []models.Book) (fileFound bool) {
 	// Populate series membership for this book.
 	if series != nil {
 		for _, ref := range book.SeriesRefs {
@@ -2918,7 +2931,7 @@ func handleNewWantedBook(ctx context.Context, books *db.BookRepo, series *db.Ser
 
 	// Check if the user already owns this book before queuing a download.
 	if finder != nil {
-		if existingPath := finder.FindExisting(ctx, book.Title, authorName, book.MediaType); existingPath != "" {
+		if existingPath := findExistingForNewBook(ctx, books, finder, book, authorName, siblings); existingPath != "" {
 			if existingFileOwnedByOtherBook(ctx, books, existingPath, book.ID) {
 				slog.Info("library: matching file already belongs to another book, not binding it",
 					"title", book.Title, "path", existingPath)
@@ -2938,6 +2951,61 @@ func handleNewWantedBook(ctx context.Context, books *db.BookRepo, series *db.Ser
 		}
 	}
 	return false
+}
+
+// rivalAwareFinder is the optional capability of a LibraryFinder that can
+// weigh a library file against the author's other catalogue titles before
+// offering it for a new book. Implemented by *importer.LibrarySnapshot.
+type rivalAwareFinder interface {
+	FindExistingAmong(ctx context.Context, title, authorName, mediaType string, rivals []string) string
+}
+
+// findExistingForNewBook asks finder for a file the user already has for
+// book, with the author's other books as rival titles when the finder can use
+// them (#2941). FindExisting alone matches on the wanted title, so the
+// shorter "Harry Potter" took an untracked "Harry Potter en het vervloekte
+// kind.epub", skipped its search, and left the exact book unbound once the
+// file was owned.
+//
+// siblings is the author's catalogue when the caller already holds it, which
+// the author sync does: reading it again per new book costs a full author
+// listing each time. nil means read it here; every caller runs after its book
+// rows are written, so the listing holds the new book's siblings.
+//
+// Excluded books are not rivals: a row the user removed from the catalogue
+// must not keep a file from the book they kept. Another user's book is left
+// out too, so one user's catalogue never steers another's binds. A listing
+// error falls back to the plain lookup, which is the old behaviour.
+func findExistingForNewBook(ctx context.Context, books *db.BookRepo, finder LibraryFinder, book models.Book, authorName string, siblings []models.Book) string {
+	// A Scanner hands out a snapshot; a fresh one costs the same single walk
+	// its own FindExisting makes.
+	finder = snapshotFinder(finder)
+	ra, ok := finder.(rivalAwareFinder)
+	if !ok || book.AuthorID == 0 || (siblings == nil && books == nil) {
+		return finder.FindExisting(ctx, book.Title, authorName, book.MediaType)
+	}
+	// Rivals drop files before ranking, so they can turn a near tie into a
+	// clear answer as well as remove one: the lookup always needs them.
+	if siblings == nil {
+		var err error
+		siblings, err = books.ListByAuthor(ctx, book.AuthorID)
+		if err != nil {
+			slog.Warn("library: list author books for rival titles", "error", err, "book_id", book.ID)
+			return finder.FindExisting(ctx, book.Title, authorName, book.MediaType)
+		}
+	}
+	rivals := make([]string, 0, len(siblings))
+	for i := range siblings {
+		s := &siblings[i]
+		if s.ID == book.ID || s.Excluded || s.AuthorID != book.AuthorID {
+			continue
+		}
+		if book.OwnerUserID != 0 && s.OwnerUserID != 0 && s.OwnerUserID != book.OwnerUserID {
+			continue
+		}
+		rivals = append(rivals, s.Title)
+	}
+	return ra.FindExistingAmong(ctx, book.Title, authorName, book.MediaType, rivals)
 }
 
 // existingFileOwnedByOtherBook reports whether a file FindExisting offered
