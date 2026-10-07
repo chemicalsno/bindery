@@ -104,3 +104,7 @@
 @utility right-safe-* {
   right: calc(--spacing(--value(number)) + env(safe-area-inset-right));
 }
+
+@utility left-safe-* {
+  left: calc(--spacing(--value(number)) + env(safe-area-inset-left));
+}
