@@ -793,6 +793,7 @@ func main() {
 		WithHardcoverFeatureSettings(settingsRepo, cfg.EnhancedHardcoverAPI).
 		WithFinder(importScanner).
 		WithEditionHydration(editionRepo).
+		WithMetadataProfiles(metadataProfileRepo).
 		WithLifetimeCtx(appCtx)
 	importListHandler := api.NewImportListHandler(importListRepo, settingsRepo, hcSyncer, userRepo)
 	metadataProfileHandler := api.NewMetadataProfileHandler(metadataProfileRepo)
