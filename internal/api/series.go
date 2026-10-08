@@ -1299,8 +1299,9 @@ func (h *SeriesHandler) seriesHasAuthorAgreement(ctx context.Context, series *mo
 				authorsByID[local.Book.AuthorID] = localAuthor
 			}
 		}
-		match := textutil.MatchAuthorName(localAuthor, candidateAuthor)
-		if match.Kind == textutil.AuthorMatchExact || match.Kind == textutil.AuthorMatchFuzzyAuto {
+		// The series titles already agree, so a pairing that only drops
+		// initials is enough here (#2881).
+		if textutil.MatchAuthorName(localAuthor, candidateAuthor).ConfirmedByTitle() {
 			return true, nil
 		}
 	}
