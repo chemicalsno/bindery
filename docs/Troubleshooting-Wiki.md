@@ -12,10 +12,103 @@ Title-only releases, connecting words, file-format labels and narrator credits
 remain supported. Unrecognised trailing text can be conservatively rejected;
 inspect the release's title and author rather than relying only on shared words.
 
-These checks use the release name. They do not verify the contents of a download
-or repair an existing incorrect import. If a previously imported file is another
+These checks use the release name. They do not open the download. A separate
+check does, once the download has finished: Bindery compares an EPUB's own title
+and author with the book it was grabbed for, and for an audiobook compares the
+audio tags of its files with the book. It is set per format under Settings,
+General, File Naming (`import.ebook.content_check` and
+`import.audiobook.content_check`), defaults to
+`warn`, which imports the file and records what it found on the History row and
+in webhooks as `contentCheck`, and only refuses a download in `block` mode. See
+[the User Guide](User-Guide-Wiki.md) for what counts as a mismatch. Nothing
+repairs an existing incorrect import. If a previously imported file is another
 book, use **Fix match** to assign it to the correct book before requesting a
 replacement for the original.
+
+### An import was blocked because the file looks like a different book
+
+The message names what was found and what the book is. For an ebook, for example
+`the file says it is "Mary and Mr Eliot: A Sort of Love Story" by Mary Trevelyan,
+but the book is "Mary, Mary: Alex Cross, Book 11" by James Patterson`. For an
+audiobook, `the files contain Corralled (9), Coming Home to Myself (8), but the
+book is "Chase" (2 of 19 tracks match)`, with the number of files in brackets.
+The release is already on the Blocklist and the book is still Wanted, so the
+next search picks another release.
+
+- **The file really is the book** (a mislabelled or foreign language edition, a
+  file whose metadata or tags are wrong): use **Match to book** on the Queue row.
+  That keeps the file and skips the check.
+- **The author is a pen name** (ebooks): add it as an alias on the author, and
+  **Retry import** will accept the file.
+- **An audiobook is the right book but its tags disagree with each other** (some
+  files carry a retitled or regional album name): use **Match to book**. A
+  folder whose every file carries the same other title is not blocked, since
+  that is what a translated edition looks like.
+- **You would rather be warned than blocked**: set the check to `warn`. The
+  import goes ahead and the History row shows what was found.
+
+
+### What the content check does not catch, and where it can be wrong
+
+Use `block` with care. The check compares what the file says about itself, so it
+inherits whatever that data gets wrong. Known limits:
+
+- **Spelling variants of a name or title that Bindery does not fold**: a
+  transliteration (`Fyodor Dostoyevsky` against `Fjodor Dostojewski`, `Schuld und
+  Suehne` against `Schuld und Sühne`), a different English edition title
+  (`Philosopher's Stone` against `Sorcerer's Stone`), `1984` against `Nineteen
+  Eighty-Four`, or a real name against its pen name when no alias is recorded
+  (`Eric Arthur Blair` for `George Orwell`). Aliases fix author spelling variants,
+  and a variant title with a matching author is never flagged because both must
+  disagree. Where it matters, leave the check on `warn`.
+- **A download that is wholly one other book**: an audiobook folder whose every
+  file carries one other title passes, because that is what a translated or
+  retitled edition looks like. In `warn` and `block` the `contentCheck` object
+  then carries `retitled` with the title and file count, and History shows a quiet
+  line, but nothing is blocked.
+- **`Dune` against `Dune Messiah`**: a short wanted title is supported by any
+  title that contains it as whole words, by design, so this passes.
+- **Multi-part single books** such as The Lord of the Rings or The Chronicles of
+  Narnia, which are one catalogue book whose files may carry the parts' titles.
+- **Transliterated and non-Latin editions** never flag; a wrong book in another
+  script is not caught either.
+- **Sampling**: more than 500 audio files are sampled evenly, and two adjacent
+  foreign files can fall between samples.
+- **Formats that are not read**: `.wma`, `.aac` and `.wav` audiobook files carry no
+  tags the check reads, so they fail open, as do unreadable files.
+- **A wrong book with a placeholder creator** (Unknown, calibre, a publisher) imports
+  even in `block` mode, because a creator that names nobody can never disagree and
+  both title and author must disagree to flag.
+- **A small foreign share is treated as strays**: files that do not support the
+  book must be at least 5 percent of the tracks read, so 30 foreign files in 700
+  do not flag the folder.
+- **A wrong book in another script never flags**, in either check.
+- **Numeric titles and short number words**: a wanted title like `Slaughterhouse 5`
+  is read as equal to `Slaughterhouse Five`, so titles that differ only by a number
+  word and a digit are the same to the check.
+- **Hung network shares can exceed the budget**: a read already in flight is not
+  interrupted, so the 30 second audiobook budget is checked between files.
+- **Publisher style creators that are not on the short list** (`Penguin Books`,
+  `Baen Books`, `DAW Books`, `Scholastic Press`, `Penguin Group USA`, `Pearson
+  Education`, `Pan Macmillan`, `Random House Audio`, `Harlequin`) are read as
+  authors. Only the explicit publisher list and the endings Inc, Ltd, LLC, GmbH,
+  Publishing, Publishers and Group count as no creator, so a wrong title with such
+  a creator can flag.
+- **Release group stamps in an audiobook album** such as `Downloaded from
+  rutracker.org` or `[example.com] Dune` can count as another title, because only
+  `www.`, a scheme, a word with two or more dots or a lone domain is read as a web
+  address.
+- **A release with more than 20 EPUBs** is not judged at all (the note says
+  `truncated`), since a verdict on a prefix could condemn the right book.
+- **Short story and compilation titles** that are not worded as one (a single word
+  title that is really an anthology) are compared like any book. The compilation
+  skip covers omnibus, anthology, short stories, collected and complete works,
+  trilogy and similar, `Complete` plus two or three words, `X Y Collection`, and
+  `The Best of <the book's author>`.
+- **Retry import after a book was matched from the file name**: a download grabbed
+  without a book is matched to one from its file or release name, and that match is
+  saved on the download. Bindery does not record that it was a guess, so Retry
+  import on such a download checks the saved book as if it had been grabbed for it.
 
 ## Bindery will not start after upgrading: "foreign_key_check found N violation(s)"
 

@@ -994,7 +994,57 @@ without a custom template:
 | `format` | `ebook` \| `audiobook` on `bookImported` and `upgrade`. **Omitted for Apprise targets only** (a URL with a `/notify` path segment) — Apprise reserves `format` for the body markup and rejects anything but `text`/`html`/`markdown` with HTTP 400. Every other consumer still receives it |
 | `mediaFormat` | the same value as `format`, always present. Use this one if your relay is Apprise, or if you want a key that is never stripped |
 | event extras | `author`, `size`, `path`, `status`, `clientId` when relevant |
+| `contentCheck` | on `bookImported` when `import.ebook.content_check` or `import.audiobook.content_check` is `warn` (the default) and the files look like another book, and on `downloadFailed` when `block` refused the download. Absent when the check found nothing worth recording and when it is `off`. Two notes ride without a flag and without any block: `retitled` (a download whose every file names one other title) and `truncated` (the check was skipped because it ran out of time, or a release held more EPUBs than the cap). See below |
 | `requestCreated` extras | `kind` (`book` \| `author`), `username`, `mediaType`, `requestId`. `title`, `author` and `username` have control and invisible characters removed, are length capped, and have `@`, `<`, `>`, `[` and `]` replaced with fullwidth lookalikes, and the `://` of any URL broken the same way, so a title or username cannot mention a channel, use a Slack escape such as `<!channel>`, form a markdown link or autolink a URL. The same request from the same person notifies at most once an hour, and one requester at most 10 times an hour. The event is off on every webhook until its **Request** toggle is turned on |
+
+**`contentCheck`** (#3015, #3246) says what the post-download content check found. The
+same object rides on the `bookImported` history row's `data` and webhook in
+`warn` mode, and on the `importFailed` history row's `data` and the
+`downloadFailed` webhook in `block` mode. For an ebook:
+
+```json
+{
+  "kind": "ebook",
+  "bookTitle": "Mary, Mary: Alex Cross, Book 11",
+  "bookAuthor": "James Patterson",
+  "mismatches": [
+    { "file": "book.epub", "title": "Mary and Mr Eliot: A Sort of Love Story", "author": "Mary Trevelyan" }
+  ]
+}
+```
+
+`mismatches` lists the EPUBs that disagreed on both title and author, at most 10 of them, with `moreTitles` saying how many more there were and `filesRead` how many EPUBs were opened (at most 20 per release). For an
+audiobook (#3246) the object reports what the audio tags said:
+
+```json
+{
+  "kind": "audiobook",
+  "bookTitle": "Chase",
+  "bookAuthor": "James Patterson",
+  "tracksRead": 19,
+  "matches": 2,
+  "mismatches": [
+    { "title": "Corralled", "count": 9 },
+    { "title": "Coming Home to Myself", "count": 8 }
+  ]
+}
+```
+
+`tracksRead` is how many files had readable tags, `matches` how many of them
+name the book, and `mismatches` the other works found with the number of files
+each, most files first and capped at 10 titles (`moreTitles` says how many were
+left out). `sampled: true` appears when the download held more than 500 audio
+files and a sample spread across the folder was read. `retitled`
+(`{title, files}`) appears on a pass where no file supports the book and every
+file names one other title, with an empty `mismatches` list. `truncated: true`
+means the 30 second budget ran out and the check failed open; `tracksRead` is how
+far it got. The text is
+cleaned like other text that comes from outside Bindery: control characters are
+removed, length is capped, and `@`, `<`, `>`, `[`, `]` and the `://` of a URL are
+replaced with fullwidth lookalikes, so a hostile file cannot mention a channel or
+form a link in a chat relay. The settings that control it, `import.ebook.content_check`
+and `import.audiobook.content_check`, take `off`, `warn` (the default) or `block`,
+are admin only, and are listed by `GET /api/v1/settings/descriptors`.
 
 Which events a webhook receives is set per notification by `onGrab`,
 `onImport`, `onUpgrade`, `onFailure`, `onHealth`, `onBookAnnounced` and
