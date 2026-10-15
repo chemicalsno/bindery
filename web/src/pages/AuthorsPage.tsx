@@ -672,7 +672,7 @@ export default function AuthorsPage() {
                   title={`Select ${author.authorName}`}
                   aria-label={`Select ${author.authorName}`}
                 />
-                <Link to={`/author/${author.id}`} state={authorNavState(i)} className="flex gap-3 p-4 hover:bg-slate-200/40 dark:hover:bg-zinc-800/40 transition-colors">
+                <Link to={`/author/${author.id}`} state={authorNavState(i)} className="flex gap-3 p-4 rounded-t-lg focus-visible:-outline-offset-2 hover:bg-slate-200/40 dark:hover:bg-zinc-800/40 transition-colors">
                   <CoverImage loading="lazy" decoding="async" src={author.imageUrl} alt={author.authorName} className="w-16 h-16 rounded-full object-cover flex-shrink-0"
                     fallback={
                       <div className="w-16 h-16 rounded-full bg-slate-200 dark:bg-zinc-800 flex items-center justify-center flex-shrink-0 text-xl font-bold text-slate-500 dark:text-zinc-600">
