@@ -249,6 +249,54 @@ A Queue row in `failed` never produced a file: the grab did not reach the downlo
 
 To retry in bulk, tick the rows and use **Retry selected**, or use **Retry all failed** above the list, which covers both stages: an import failure has its import re-armed, a failed download has its release re-sent. Both ask for confirmation when a re-send is in the batch, because that hands work back to your download client.
 
+### A grab fails with "indexer ... is pinned to download client ..."
+
+The indexer has a **Download client** set in Settings → Indexers, and that client
+cannot take the grab. The message says which of three things is wrong: the client
+is **disabled** (enable it in Settings → Download Clients), it **no longer
+exists** (choose another client on the indexer), or it is the **wrong protocol**
+(a torrent client on a usenet indexer, usually because the client's type was
+changed after the pin). If the client is enabled but the message says the
+release could not be sent, the client is not answering: check that it is running
+and reachable from Bindery.
+
+The message names the indexer, and the client too when you are an admin; other
+users see the indexer only.
+
+Bindery will not send the release to a different client. That is deliberate: the
+pin exists so a private tracker's torrents never reach your public client. To
+send the indexer's grabs through the normal routing again, set its **Download
+client** back to *Default*. A grab refused before anything was sent creates no
+Queue row: from the search page the error appears on the page, and a scheduled
+search records it in History (once a day per book and indexer, and as a
+notification naming the indexer). Just search or grab again once the cause is
+fixed. Only a grab that reached an enabled client and failed there leaves a
+failed Queue row with **Retry download**.
+
+Limits worth knowing:
+
+* A scheduled search skips only the failing indexer's releases. Releases from
+  other indexers for the same book are still grabbed, and nothing from the
+  pinned indexer goes to another client.
+* Which indexer a grab belongs to is decided from the `indexerId` sent and the
+  release URL's host: a pinned `indexerId` always wins; an unpinned one is taken
+  at face value if its host matches the URL (and refused if it contradicts the
+  URL's host while a pinned indexer owns that host); an unknown or missing id is
+  treated as no id, and then the indexers on the URL's host decide (none:
+  unpinned, one: that indexer, several with one pinned: refused). Grabs from the
+  Bindery UI and the scheduler always send the indexer.
+* An id-less API grab can only be tied to a pinned indexer by host. The match
+  ignores case, a trailing dot and the port, so `prowlarr` against
+  `prowlarr:9696` works. It does not match aliases of one machine (`localhost`,
+  `127.0.0.1` and a DNS name), `www.` or other subdomains, scheme-less indexer
+  URLs or punycode spellings; such a grab is routed as if unpinned. Send
+  `indexerId` to be sure the pin applies.
+* On a shared Prowlarr or Jackett host, one pinned indexer makes id-less API
+  grabs fail for every other indexer on that host, because such a grab cannot be
+  told apart. Send `indexerId` (the UI and the scheduler already do).
+* A pending (held) release from a pinned indexer whose client is down stays in
+  Pending and is tried again on the next sweep. It is not discarded.
+
 ### The Queue looks empty, or shorter than it should be
 
 Look for a banner above the list saying *Could not reach `<client>`. This list may be incomplete*. Bindery gives each download client a short deadline when it renders the Queue, and a client that misses it is dropped from that render, so its rows are missing until the next poll succeeds. The rows and the downloads themselves are fine. Check the client is up and reachable at the host and port in **Settings → Download clients** (its **Test** button is the quickest answer), and remember a client that is up but very slow to answer will do this intermittently.
