@@ -212,22 +212,24 @@ type Scheduler struct {
 	debugLog *indexer.DebugLog
 	meta     *metadata.Aggregator
 
-	authors         *db.AuthorRepo
-	books           *db.BookRepo
-	indexers        *db.IndexerRepo
-	downloads       *db.DownloadRepo
-	clients         *db.DownloadClientRepo
-	history         *db.HistoryRepo
-	settings        *db.SettingsRepo
-	blocklist       *db.BlocklistRepo
-	delayProfiles   *db.DelayProfileRepo
-	pending         *db.PendingReleaseRepo
-	aliases         *db.AuthorAliasRepo     // optional; used for non-latin author matching
-	profiles        *db.MetadataProfileRepo // optional; applies profile language filters to auto-grab
-	qualityProfiles *db.QualityProfileRepo  // optional; enforces the profile's allowed formats on auto-grab (#1693)
-	editions        *db.EditionRepo         // optional; supplies the book ISBN the ranker's exact-match bonus needs (#1724)
-	calibreSyncer   CalibreSyncer           // optional; nil if Calibre is not configured
-	recommender     RecommendationEngine    // optional; generates recommendations
+	authors            *db.AuthorRepo
+	books              *db.BookRepo
+	indexers           *db.IndexerRepo
+	downloads          *db.DownloadRepo
+	clients            *db.DownloadClientRepo
+	history            *db.HistoryRepo
+	settings           *db.SettingsRepo
+	blocklist          *db.BlocklistRepo
+	delayProfiles      *db.DelayProfileRepo
+	pending            *db.PendingReleaseRepo
+	aliases            *db.AuthorAliasRepo     // optional; used for non-latin author matching
+	profiles           *db.MetadataProfileRepo // optional; applies profile language filters to auto-grab
+	qualityProfiles    *db.QualityProfileRepo  // optional; enforces the profile's allowed formats on auto-grab (#1693)
+	editions           *db.EditionRepo         // optional; supplies the book ISBN the ranker's exact-match bonus needs (#1724)
+	libraryContextWarn sync.Once
+	series             *db.SeriesRepo       // optional; supplies the wanted book's series position to the relevance filter (#3268)
+	calibreSyncer      CalibreSyncer        // optional; nil if Calibre is not configured
+	recommender        RecommendationEngine // optional; generates recommendations
 	// operatorUserID resolves the user the recommendation job writes under.
 	// Optional; nil falls back to the historical hardcoded admin id (#1725).
 	operatorUserID       func(context.Context) int64
@@ -334,6 +336,14 @@ func (s *Scheduler) WithHistory(h *db.HistoryRepo) {
 // in MatchCriteria for non-latin author name matching. Must be called before Start.
 func (s *Scheduler) WithAliases(aliases *db.AuthorAliasRepo) {
 	s.aliases = aliases
+}
+
+// WithSeries attaches the series repo so auto-grab can give the relevance
+// filter the wanted book's position in its series (#3268). Optional: without
+// it the filter judges a numbered release on the release name alone. Must be
+// called before Start.
+func (s *Scheduler) WithSeries(series *db.SeriesRepo) {
+	s.series = series
 }
 
 // WithMetadataProfiles attaches the metadata profile repo so auto-grab can
@@ -1206,6 +1216,25 @@ func (s *Scheduler) searchAndGrabFormat(ctx context.Context, book models.Book, m
 	if book.ReleaseDate != nil {
 		crit.Year = book.ReleaseDate.Year()
 	}
+	// What the library knows about the wanted book lets the relevance filter
+	// tell a release of this book from the next one in its series (#3268).
+	// Two reads per search, never per release; a missing repo or a failed
+	// read only leaves the rules that need it quiet.
+	indexer.WarnLibraryContextMissing(&s.libraryContextWarn, "scheduler", s.series == nil, s.books == nil)
+	var seriesRead indexer.SeriesReader
+	if s.series != nil {
+		seriesRead = s.series.GetPrimarySeriesForBook
+	}
+	var booksRead indexer.AuthorBooksReader
+	if s.books != nil {
+		// The wanted book's owner scopes the author's titles, as the
+		// interactive search scopes them to the caller. No owner means no
+		// scope, the same fallback ListByAuthorAndUser applies to user 0.
+		booksRead = func(ctx context.Context, authorID int64) ([]models.Book, error) {
+			return s.books.ListByAuthorAndUser(ctx, authorID, book.OwnerUserID)
+		}
+	}
+	crit.SetLibraryContext(ctx, book, seriesRead, booksRead)
 	if s.editions != nil {
 		if eds, err := s.editions.ListByBook(ctx, book.ID); err != nil {
 			slog.Warn("failed to load editions for search ISBN", "book_id", book.ID, "error", err)

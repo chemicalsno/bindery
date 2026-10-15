@@ -243,7 +243,7 @@ func (s *Searcher) SearchBookWithDebug(ctx context.Context, indexers []models.In
 	results = filterNonBookContent(results)
 	dbg.Pipeline.AfterNonBookContent = len(results)
 
-	results, relFilters := filterRelevantDebug(results, c.Title, c.Author, c.AuthorAliases)
+	results, relFilters := filterRelevantWithContext(results, c.Title, c.Author, c.AuthorAliases, c.context())
 	dbg.Filters = append(dbg.Filters, relFilters...)
 	dbg.Pipeline.AfterRelevance = len(results)
 
@@ -259,12 +259,12 @@ func filterUsenetJunkDebug(results []newznab.SearchResult) ([]newznab.SearchResu
 	out := make([]newznab.SearchResult, 0, len(results))
 	var dropped []FilterDebug
 	for _, r := range results {
-		if usenetJunkRe.MatchString(r.Title) {
+		if reason := usenetJunkReason(r.Title); reason != "" {
 			dropped = append(dropped, FilterDebug{
 				Title:       r.Title,
 				IndexerName: r.IndexerName,
 				Stage:       "usenet-junk",
-				Reason:      "looks like a raw per-article posting (RAR/PAR2/SFV/yEnc/[N/M])",
+				Reason:      reason,
 			})
 			continue
 		}

@@ -102,6 +102,22 @@ type MatchCriteria struct {
 	// term keeps the flat, capped bonus it has always used rather than
 	// dividing by zero.
 	DurationSeconds int
+	// SeriesPosition is the wanted book's position in its primary series as
+	// stored ("3", "1-3", ""). The relevance filter uses it to tell a release
+	// that names the wanted book's own number from one that names a later book
+	// (#3268). Empty when the book has no series position; the filter then
+	// judges a numbered release on the release name alone.
+	SeriesPosition string
+	// SeriesTitle is the title of the wanted book's primary series. The
+	// relevance filter never reads a library title that equals, contains or is
+	// contained in it as "another title", because releases name their series
+	// (#3268). Empty when the book has no series.
+	SeriesTitle string
+	// AuthorTitles are the titles of the author's OTHER books in the library
+	// (not the wanted book). The relevance filter rejects a release that goes
+	// on to name one of them after the wanted title (#3268). Empty disables
+	// that rule only.
+	AuthorTitles []string
 }
 
 // CriteriaISBN picks the ISBN to put in MatchCriteria.ISBN for a book, given
@@ -353,7 +369,7 @@ func (s *Searcher) SearchBook(ctx context.Context, indexers []models.Indexer, c 
 	results = dedupe(results)
 	results = filterUsenetJunk(results)
 	results = filterNonBookContent(results)
-	results = filterRelevant(results, c.Title, c.Author, c.AuthorAliases)
+	results, _ = filterRelevantWithContext(results, c.Title, c.Author, c.AuthorAliases, c.context())
 	rankResults(results, c)
 	return results
 }
@@ -899,6 +915,13 @@ func filterRelevant(results []newznab.SearchResult, title, author string, aliase
 // kept for a "Volume 17" title (#2921). One implementation means a guard
 // cannot land in one path and miss the other.
 func filterRelevantDetailed(results []newznab.SearchResult, title, author string, aliases []string) ([]newznab.SearchResult, []FilterDebug) {
+	return filterRelevantWithContext(results, title, author, aliases, bookContext{})
+}
+
+// filterRelevantWithContext is filterRelevantDetailed given what the library
+// knows about the wanted book (see bookContext). A zero bookContext is
+// filterRelevantDetailed exactly.
+func filterRelevantWithContext(results []newznab.SearchResult, title, author string, aliases []string, bc bookContext) ([]newznab.SearchResult, []FilterDebug) {
 	// Strip edition qualifiers ("(German Edition)" etc.) and normalize
 	// smart quotes before tokenizing, so they don't become spurious keywords.
 	// Format qualifiers mid title ("(Light Novel)") go too, matching what the
@@ -986,13 +1009,69 @@ func filterRelevantDetailed(results []newznab.SearchResult, title, author string
 		return FilterDebug{Title: r.Title, IndexerName: r.IndexerName, Stage: "relevance", Reason: reason}
 	}
 
+	rules := newTrailingRules(title, bc, fullIdentity, fullIdentityElided, primaryIdentity, primaryIdentityElided, seriesIdentity)
+	subtitle := newSubtitleInfo(title)
+
+	authorConflict := func(r newznab.SearchResult) bool {
+		return conflictingTitleAuthor(r.Title, title, authorTokenSets) ||
+			conflictingTitleAuthor(r.Title, primaryTitle(title), authorTokenSets) ||
+			(seriesTitle != "" && conflictingTitleAuthor(r.Title, seriesTitle, authorTokenSets))
+	}
+
+	// evalFull reads one result against the whole title: whether its keywords
+	// and identity match, whether it is approved on them, and why not when
+	// the trailing rules (#3268) reject it. The title is whole in the release
+	// but the release may go on to name another book; a release that carries
+	// the full title and is rejected there is not retried under the shorter
+	// readings, which would only match the same words again.
+	evalFull := func(i int) (keywords, ok bool, trailing string) {
+		r, n := results[i], normTitles[i]
+		identity := strings.Join(titleIdentityWords(r.Title), " ")
+		keywords = tryMatch(n, fullKws) || tryMatchElided(n, fullElided, fullKws)
+		ok = keywords &&
+			identityOK(identity, fullIdentity, fullIdentityElided) &&
+			volumeNumberAgrees(n, title)
+		if ok {
+			if trailing = rules.check(r.Title, n, fullIdentity, fullIdentityElided); trailing != "" {
+				ok = false
+			}
+		}
+		return keywords, ok, trailing
+	}
+
+	// fullTitleTypes is the set of media types for which some result in the
+	// batch carries the whole title, is approved on it, is the same book (no
+	// summary or study aid wording, nothing but release furniture after the
+	// title) and has a determinable media type. The main title reading is
+	// judged against it (see subtitleInfo.mainTitleOnly): a release that names
+	// only the main title is a sibling of one that names the book, but only a
+	// sibling of the same media type. Computed on first use, so a batch that
+	// never reaches the main title reading pays nothing.
+	var fullTitleTypes map[string]bool
+	anyFullInBatch := func(mediaType string) bool {
+		if fullTitleTypes == nil {
+			fullTitleTypes = map[string]bool{}
+			for i, r := range results {
+				if authorConflict(r) {
+					continue
+				}
+				if _, ok, _ := evalFull(i); !ok {
+					continue
+				}
+				if mt := releaseMediaType(r.Title); mt != "" &&
+					fullTitleCounts(r.Title, normTitles[i], authorTokenSets, fullIdentity, fullIdentityElided) {
+					fullTitleTypes[mt] = true
+				}
+			}
+		}
+		return fullTitleTypes[mediaType]
+	}
+
 	filtered := make([]newznab.SearchResult, 0, len(results))
 	var dropped []FilterDebug
 	for i, r := range results {
 		n := normTitles[i]
-		if conflictingTitleAuthor(r.Title, title, authorTokenSets) ||
-			conflictingTitleAuthor(r.Title, primaryTitle(title), authorTokenSets) ||
-			(seriesTitle != "" && conflictingTitleAuthor(r.Title, seriesTitle, authorTokenSets)) {
+		if authorConflict(r) {
 			dropped = append(dropped, drop(r, "release names a different author for this title"))
 			continue
 		}
@@ -1001,31 +1080,45 @@ func filterRelevantDetailed(results []newznab.SearchResult, title, author string
 		identity := strings.Join(titleIdentityWords(r.Title), " ")
 
 		// allowFallback=true: each result gets phrase match first, then keyword
-		// fallback if the phrase fails. No batch-level gate.
-		fullKeywords := tryMatch(n, fullKws) || tryMatchElided(n, fullElided, fullKws)
-		fullOK := fullKeywords &&
-			identityOK(identity, fullIdentity, fullIdentityElided) &&
-			volumeNumberAgrees(n, title)
+		// fallback if the phrase fails.
+		fullKeywords, fullOK, trailing := evalFull(i)
 		primaryKeywords, primaryOK := false, false
-		if !fullOK && len(primaryKws) > 0 && !sameKws(primaryKws, fullKws) {
+		if !fullOK && trailing == "" && len(primaryKws) > 0 && !sameKws(primaryKws, fullKws) {
 			primaryKeywords = tryMatch(n, primaryKws) || tryMatchElided(n, primaryElided, primaryKws)
 			primaryOK = primaryKeywords &&
 				identityOK(identity, primaryIdentity, primaryIdentityElided) &&
 				volumeNumberAgrees(n, primaryTitle(title))
+			if primaryOK {
+				if trailing = rules.check(r.Title, n, primaryIdentity, primaryIdentityElided); trailing == "" {
+					// The release carries the main title and not the whole
+					// one; is it still this book (#3268, part 2)?
+					trailing = subtitle.mainTitleOnly(rules, r.Title, n, identity, anyFullInBatch, primaryIdentity, primaryIdentityElided)
+				}
+				if trailing != "" {
+					primaryOK = false
+				}
+			}
 		}
 		seriesKeywords, seriesOK := false, false
-		if !fullOK && !primaryOK && len(seriesKws) > 0 {
+		if !fullOK && !primaryOK && trailing == "" && len(seriesKws) > 0 {
 			seriesKeywords = tryMatch(n, seriesKws)
 			seriesOK = seriesKeywords &&
 				(len(seriesIdentity) < 2 || ContainsPhrase(identity, seriesIdentity)) &&
 				volumeNumberAgrees(n, seriesTitle)
+			if seriesOK {
+				if trailing = rules.check(r.Title, n, seriesIdentity); trailing != "" {
+					seriesOK = false
+				}
+			}
 		}
 		if fullOK || primaryOK || seriesOK {
 			filtered = append(filtered, r)
 			continue
 		}
 		reason := "title/author keywords did not match release name"
-		if fullKeywords || primaryKeywords || seriesKeywords {
+		if trailing != "" {
+			reason = trailing
+		} else if fullKeywords || primaryKeywords || seriesKeywords {
 			// The keywords are all there but the release's title is not this
 			// one: other words sit between them, as "12 Rules for Life" inside
 			// "12 More Rules for Life", or a number differs, as "Volume 16"
@@ -1296,7 +1389,7 @@ var usenetJunkRe = regexp.MustCompile(
 func filterUsenetJunk(results []newznab.SearchResult) []newznab.SearchResult {
 	out := make([]newznab.SearchResult, 0, len(results))
 	for _, r := range results {
-		if !usenetJunkRe.MatchString(r.Title) {
+		if usenetJunkReason(r.Title) == "" {
 			out = append(out, r)
 		}
 	}
