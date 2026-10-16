@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/vavallee/bindery/internal/indexer/newznab"
 	"github.com/vavallee/bindery/internal/isbnutil"
@@ -1566,6 +1568,89 @@ func releaseLanguageCodes(norm string) []string {
 	return out
 }
 
+// sceneMarkerTokens are the words that mark the metadata suffix of a scene
+// audiobook release name ("Author-Title-AUDIOBOOK-WEB-MP3-DE-2023-GRP").
+// Everything after the last of them is release metadata, not title (#3271).
+var sceneMarkerTokens = map[string]bool{
+	"audiobook": true, "abook": true, "mp3": true, "m4b": true, "flac": true, "aac": true,
+}
+
+// releaseLanguageCodeSet is every code releaseLanguageTags can produce. A
+// scene code only counts when it normalizes into this set, so it stays inside
+// the vocabulary the profile editor offers, and a token such as "web" or a
+// group name that NormalizeLanguageCode passes through unchanged is ignored.
+var releaseLanguageCodeSet = func() map[string]bool {
+	set := make(map[string]bool, len(releaseLanguageTags))
+	for _, code := range releaseLanguageTags {
+		set[code] = true
+	}
+	return set
+}()
+
+var (
+	// sceneTokenRe splits a raw release name into the same letter and digit
+	// runs NormalizeRelease keeps as tokens.
+	sceneTokenRe = regexp.MustCompile(`[\p{L}\p{N}]+`)
+	// sceneTrailerRe matches what can follow the release group at the end of
+	// a name: a usenet part counter ("(1/12)"), quotes and spaces, or a file
+	// extension. They are stripped first so the last token is the group.
+	sceneTrailerRe = regexp.MustCompile(`(?i)(\s*[(\[]\d+/\d+[)\]]|["'\s]+|\.(nzb|torrent|nfo|par2|rar|zip|epub|mobi|azw3?|pdf|mp3|m4b|m4a|flac))$`)
+	sceneYearRe    = regexp.MustCompile(`^(19|20)\d\d$`)
+)
+
+// sceneLanguageCodes returns the language codes in the scene suffix of a raw
+// release name: tokens after the last scene marker that are a language code
+// ("DE", "POR", "NO"), read through models.NormalizeReleaseLanguageCode so
+// the country codes groups use ("SE", "DK") count too. As bare words most of
+// these are common ("de", "no", "it"), which is why #2274 left them out; they
+// are only read after a scene marker, never in the title.
+//
+// It takes the raw name, not NormalizeRelease's, because the shape matters. A
+// scene suffix is joined by separators ("-WEB-MP3-DE-2023-GRP"). One with
+// spaces in it is usually prose ("(Audiobook) read by Ola De Vries", "MP3 -
+// Hi Quality - 2010"), so there a token only counts when it is uppercase and
+// sits right before a year or the group ("-DE-2005-GRP iNT").
+func sceneLanguageCodes(title string) []string {
+	for {
+		trimmed := sceneTrailerRe.ReplaceAllString(title, "")
+		if trimmed == title {
+			break
+		}
+		title = trimmed
+	}
+	locs := sceneTokenRe.FindAllStringIndex(title, -1)
+	toks := make([]string, len(locs))
+	for i, loc := range locs {
+		toks[i] = title[loc[0]:loc[1]]
+	}
+	// The suffix starts after the last marker. A marker in first position is
+	// a leading tag ("[MP3] Author - Title"), not a suffix, so it doesn't
+	// count. The last token is the release group, and a group can be named
+	// like a language code ("-2026-TR").
+	start := -1
+	for i, tok := range toks {
+		if i > 0 && sceneMarkerTokens[strings.ToLower(tok)] {
+			start = i + 1
+		}
+	}
+	end := len(toks) - 1
+	if start < 0 || start >= end {
+		return nil
+	}
+	spaced := strings.ContainsFunc(title[locs[start-1][1]:], unicode.IsSpace)
+	var out []string
+	for i := start; i < end; i++ {
+		tok := toks[i]
+		if spaced && (tok != strings.ToUpper(tok) || (i+1 != end && !sceneYearRe.MatchString(toks[i+1]))) {
+			continue
+		}
+		if code := models.NormalizeReleaseLanguageCode(strings.ToLower(tok)); releaseLanguageCodeSet[code] && !slices.Contains(out, code) {
+			out = append(out, code)
+		}
+	}
+	return out
+}
+
 // FilterByAllowedLanguages drops results whose release name is tagged with a
 // language outside the metadata profile's allowed set. Untagged releases
 // always pass — most releases carry no language marker, and dropping them
@@ -1599,7 +1684,7 @@ func FilterByAllowedLanguages(results []newznab.SearchResult, allowed []string) 
 	for _, r := range results {
 		norm := NormalizeRelease(r.Title)
 		ok := true
-		for _, code := range releaseLanguageCodes(norm) {
+		for _, code := range append(releaseLanguageCodes(norm), sceneLanguageCodes(r.Title)...) {
 			if !set[code] {
 				ok = false
 				break
