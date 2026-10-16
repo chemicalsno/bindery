@@ -1430,6 +1430,21 @@ If your naming template uses `{SortAuthor}`, the same value names the folder on
 disk, so the letter an author files under and the folder it lives in always
 agree.
 
+## Finding a setting when you do not know its tab
+
+The search box at the top of Settings matches tab names and section headings
+(Telemetry, File Naming, API Keys and so on) in your language, and for admins also
+the key of any registered setting. Press `/` to jump to the box, type a few
+letters, then use the arrow keys and Enter, or just tap a result. Enter on its own
+takes the first one, and Escape clears the box. A tab or key result opens that
+tab; a heading result also scrolls to the section. The list closes when you click
+away, and says when more than eight things matched.
+
+It does not search individual field labels or help text, so a setting that has no
+heading of its own is found through its tab or section. Non admins are only
+offered the tabs and sections they can see: the admin sections of General, such
+as File Naming and Downloads, are left out for them.
+
 ## Settings most people never touch
 
 The curated Settings tabs hold the things nearly every install cares about. Behind

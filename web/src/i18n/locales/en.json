@@ -992,6 +992,16 @@
       "advanced": "Advanced"
     },
     "sectionLabel": "Settings section",
+    "search": {
+      "label": "Find a settings tab or section",
+      "placeholder": "Try telemetry, naming or a setting key",
+      "results": "Settings search results",
+      "none": "No matching tab or section",
+      "count_one": "{{count}} result",
+      "count_other": "{{count}} results",
+      "more": "Showing {{shown}} of {{total}}. Keep typing to narrow it down.",
+      "moreAnnounce": "{{total}} results, showing the first {{shown}}. Keep typing to narrow it down."
+    },
     "groups": {
       "sources": "Sources",
       "library": "Library",
