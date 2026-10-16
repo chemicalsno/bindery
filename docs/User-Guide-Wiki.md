@@ -1571,6 +1571,54 @@ and Bindery seeing the same storage at different paths (set a **path remap**
 on the download client), or files the container can't read. **Retry import**
 after fixing. ([troubleshooting](Troubleshooting-Wiki.md))
 
+**A red "Imports have a problem right now" notice shows on the Authors page.**
+Bindery has imported at least one download before (a `bookImported` or
+`downloadFolderImported` history event), but right now it cannot. The notice is
+shown to admins only and says which area to look at:
+
+- a folder Bindery imports into is missing or not writable: each root folder, or
+  the library folder when you have no root folders (plus the audiobook folder
+  when set);
+- a download folder is missing or not readable. Only readability is required,
+  so a read only download folder used in copy mode is fine. This check is
+  skipped when a path remap is set, globally or on an enabled client, and for an
+  empty download folder (the Windows default);
+- no enabled indexer;
+- no enabled download client;
+- every enabled download client failed its last health check (unreachable, or
+  its download folder is not readable).
+
+Folders are checked without writing anything (no probe files), at most every 30
+seconds. The notice never names a folder path; the Settings page it links to
+does. Limits worth knowing:
+
+- **It needs two views.** A problem has to be seen for two minutes before the
+  notice appears. The page checks when it opens and again when you return to
+  the tab (at most once a minute), not on a timer. So the first view after a
+  restart, or the first view of a new problem, only starts the clock; the notice
+  shows on a view at least two minutes later (a reload or switching back to the
+  tab). If more than ten minutes pass between views the clock starts over, and a
+  user who stays on one page the whole time sees nothing.
+- **Client health is slow.** It is the stored result of the 15 minute periodic
+  check. A client that restarted for a moment can show red for up to about 15
+  minutes after the two minute wait, and a fix takes as long to clear. The
+  message says the client could not be reached or its download folder is not
+  readable, because the check cannot tell which.
+- **A hung mount reports nothing.** If a network mount never answers its first
+  check, there is no earlier result to fall back on, so nothing is reported
+  until it answers.
+- **One folder is enough.** A single unavailable root folder (an external drive
+  you took offline on purpose) raises the notice even though imports into your
+  other root folders still work. The message says one library or download folder
+  is not available, not that everything is blocked.
+- On Windows only the folder's existence and that it can be opened are checked,
+  not whether it is writable.
+
+Installs that never imported a download, such as ones that only scan an
+existing library or use Calibre or Audiobookshelf, are not nagged.
+(`GET /api/v1/system/setup-state` carries `blocked`, `blockedArea` and
+`blockedReason` for admins.)
+
 **My browser can reach qBittorrent but Bindery's Test fails.**
 In Docker, `localhost` inside Bindery's container is Bindery, not the client —
 use the service name or LAN IP. Also check for qBittorrent's persisted IP ban
