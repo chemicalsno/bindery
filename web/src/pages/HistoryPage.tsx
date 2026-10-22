@@ -290,7 +290,7 @@ export default function HistoryPage() {
                           </div>
                           <BookAuthorLink book={event.book} />
                           {detail && (
-                            <div className={`mt-1 text-xs break-words ${isError ? 'text-red-600 dark:text-red-400' : 'text-fg-muted'}`}>
+                            <div className={`mt-1 text-xs break-words ${isError ? 'text-red-700 dark:text-red-400' : 'text-fg-muted'}`}>
                               {detail}
                             </div>
                           )}
@@ -367,7 +367,7 @@ export default function HistoryPage() {
                   </p>
                   <BookAuthorLink book={event.book} />
                   {detail && (
-                    <p className={`text-xs break-words mb-2 ${isError ? 'text-red-600 dark:text-red-400' : 'text-fg-muted'}`}>
+                    <p className={`text-xs break-words mb-2 ${isError ? 'text-red-700 dark:text-red-400' : 'text-fg-muted'}`}>
                       {detail}
                     </p>
                   )}
