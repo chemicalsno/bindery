@@ -62,7 +62,20 @@ func isPartBookTitle(title string) bool {
 	return metadata.IsBundleTitle(title)
 }
 
+// syncEnrichmentsPerHour caps how many due authors the many-author syncs
+// (Refresh all, bulk refresh, scheduled discovery) enrich in a rolling hour
+// between them (#3398). The staggered profile refresh enriches the rest, at
+// its own pace, so a large library is never asked about in one burst. A var
+// only so tests can lower it.
+var syncEnrichmentsPerHour = 100
+
 type AuthorHandler struct {
+	// syncEnrich counts the enrichments those syncs spent in the current
+	// hour; see takeSyncEnrichment.
+	syncEnrichMu     sync.Mutex
+	syncEnrichWindow time.Time
+	syncEnrichCount  int
+
 	// coverStore holds photos uploaded through POST /author/{id}/photo,
 	// the same store book covers are uploaded to (#3017).
 	coverStore                  *covers.Store
@@ -638,9 +651,9 @@ type catalogueSyncOptions struct {
 	// refresh, whatever the author's enrichment stamp says. Only the two
 	// single author actions a user takes set it, adding the author and its
 	// Refresh button, so a new author gets its photo and bio straight away.
-	// Bulk refresh, Refresh all, scheduled discovery and the imports leave it
-	// off: they span many authors, and the staggered profile refresh
-	// enriches those one at a time behind the stamp instead.
+	// Bulk refresh, Refresh all and scheduled discovery leave it off but
+	// still enrich an author that is due, within syncEnrichmentsPerHour
+	// (#3398); the imports never ask.
 	enrichProfile bool
 
 	// ownerForUnownedAuthor owns the books this run creates when the author
@@ -1661,11 +1674,10 @@ func (h *AuthorHandler) refreshAuthorProfile(ctx context.Context, author *models
 	if upstream == nil {
 		return
 	}
-	// An add or a Refresh click asks the enrichers (#3287) whatever the
-	// stamp says; their own cache still keeps a repeat click off the
-	// network. A full answer is stamped, so the staggered refresh leaves
-	// this author alone for a month. Every other sync leaves enrichment to
-	// that refresh.
+	// enrich is set by the caller (#3287): always for an add or a Refresh
+	// click, whose repeat the enrichers' own cache keeps off the network,
+	// and for the other refresh-path syncs once the stamp has aged. A full
+	// answer is stamped, so the author is not asked again for a month.
 	enrichAnswered := enrich && h.meta.EnrichAuthor(ctx, upstream)
 	defer func() {
 		if enrichAnswered {
@@ -1704,6 +1716,23 @@ func (h *AuthorHandler) refreshAuthorProfile(ctx context.Context, author *models
 	}
 	slog.Info("refreshed author profile from metadata provider",
 		"author", author.Name, "foreignId", author.ForeignID)
+}
+
+// takeSyncEnrichment spends one of the hour's syncEnrichmentsPerHour on a
+// many-author sync, reporting false once the hour's budget is gone. A fixed
+// window from the first spend: simple, and the staggered refresh picks up
+// whatever a full window leaves due.
+func (h *AuthorHandler) takeSyncEnrichment(now time.Time) bool {
+	h.syncEnrichMu.Lock()
+	defer h.syncEnrichMu.Unlock()
+	if now.Sub(h.syncEnrichWindow) >= time.Hour {
+		h.syncEnrichWindow, h.syncEnrichCount = now, 0
+	}
+	if h.syncEnrichCount >= syncEnrichmentsPerHour {
+		return false
+	}
+	h.syncEnrichCount++
+	return true
 }
 
 // mergeAuthorProfileFields copies provider-supplied profile fields onto the
@@ -1954,8 +1983,18 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 	// Single-work runs are skipped for the same reason as the re-link: the
 	// author usually already existed before this request, and an Add Book is
 	// not a request to rewrite their profile.
+	//
+	// An add and the Refresh button always enrich. The other refresh-path
+	// syncs (Refresh all, bulk refresh, scheduled discovery) enrich when it
+	// is due: they stamp the profile fresh, which takes the author out of the
+	// staggered refresh that would otherwise have enriched it, so leaving it
+	// to that refresh postponed enrichment by a day each time they ran. They
+	// share a budget of syncEnrichmentsPerHour, so Refresh all on a large
+	// library enriches the first due authors and leaves the rest due for the
+	// staggered refresh. An import still never asks.
 	if !wasCalibre && !singleWork {
-		h.refreshAuthorProfile(metaCtx, author, opts.enrichProfile)
+		enrich := opts.enrichProfile || (opts.discovery && h.authors.EnrichmentDue(metaCtx, author.ID) && h.takeSyncEnrichment(time.Now()))
+		h.refreshAuthorProfile(metaCtx, author, enrich)
 	}
 
 	// Load the author's secondary provider identities so supplemental

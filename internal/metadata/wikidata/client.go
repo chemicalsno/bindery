@@ -66,6 +66,12 @@ type Client struct {
 	wikipediaREST string
 	now           func() time.Time
 
+	// lookupSlot lets one author lookup run at a time, whoever asks: a bulk
+	// refresh syncs several authors at once (#3398), and Wikimedia's
+	// etiquette is one request after another. A channel rather than a mutex,
+	// so a caller waiting for it still answers to its context.
+	lookupSlot chan struct{}
+
 	mu        sync.Mutex
 	cache     map[string]cacheEntry
 	holdUntil time.Time
@@ -87,6 +93,7 @@ func New() *Client {
 		wikipediaREST: "https://%s.wikipedia.org/api/rest_v1",
 		now:           time.Now,
 		cache:         map[string]cacheEntry{},
+		lookupSlot:    make(chan struct{}, 1),
 	}
 }
 
@@ -105,6 +112,20 @@ func (c *Client) EnrichAuthor(ctx context.Context, author *models.Author) (*meta
 		return nil, nil
 	}
 	key := property + "=" + value
+	if profile, ok := c.cached(key); ok {
+		return profile, nil
+	}
+	if c.held() {
+		return nil, ErrHeld
+	}
+	select {
+	case c.lookupSlot <- struct{}{}:
+		defer func() { <-c.lookupSlot }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	// Checked again: a caller that waited may find this author answered, or
+	// Wikimedia holding back, by the lookup that ran before it.
 	if profile, ok := c.cached(key); ok {
 		return profile, nil
 	}

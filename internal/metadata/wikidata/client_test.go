@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -479,4 +480,78 @@ func TestEnrichAuthorBacksOffAfterRepeatedFailures(t *testing.T) {
 	if _, err := d.EnrichAuthor(ctx, &models.Author{ForeignID: "nb:author:51"}); errors.Is(err, ErrHeld) {
 		t.Error("held although an answer came between the failures")
 	}
+}
+
+// Lookups run one at a time whoever asks, so a bulk refresh syncing several
+// authors at once still sends Wikimedia one request after another (#3398).
+// A second caller asking for the same author waits and is answered from the
+// cache the first one filled.
+func TestEnrichAuthorLooksUpOneAuthorAtATime(t *testing.T) {
+	f := newFake(t)
+	var inFlight, most atomic.Int32
+	f.search = func(w http.ResponseWriter, _ string) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			m := most.Load()
+			if n <= m || most.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		fmt.Fprint(w, `{"query":{"search":[{"title":"Q100"}]}}`)
+	}
+	c := f.client()
+
+	ids := []string{"OL1A", "OL2A", "OL3A", "OL4A", "OL1A"}
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.EnrichAuthor(context.Background(), &models.Author{ForeignID: id, Name: "Kari Nordmann"}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if most.Load() != 1 {
+		t.Errorf("%d lookups ran at once, want 1", most.Load())
+	}
+	if searches := f.calls.Load(); searches > 4*4 {
+		t.Errorf("%d requests for 4 distinct authors; the repeat should come from the cache", searches)
+	}
+}
+
+// A caller waiting for the lookup slot answers to its context, so one with a
+// deadline does not sit behind a slow lookup (#3398).
+func TestEnrichAuthorWaitHonoursContext(t *testing.T) {
+	f := newFake(t)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	f.search = func(w http.ResponseWriter, _ string) {
+		close(started)
+		<-release
+		fmt.Fprint(w, `{"query":{"search":[]}}`)
+	}
+	c := f.client()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.EnrichAuthor(context.Background(), &models.Author{ForeignID: "OL1A"})
+	}()
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	begin := time.Now()
+	_, err := c.EnrichAuthor(ctx, &models.Author{ForeignID: "OL2A"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err %v, want the waiter's deadline", err)
+	}
+	if waited := time.Since(begin); waited > time.Second {
+		t.Errorf("waited %v behind the slow lookup", waited)
+	}
+	close(release)
+	<-done
 }
