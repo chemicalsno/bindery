@@ -551,7 +551,7 @@ function MetadataProfileForm({ profile, onClose, onSaved }: { profile?: Metadata
                 aria-pressed={on}
                 onClick={() => toggleLang(l.code)}
                 className={`text-xs px-2.5 py-1 rounded border transition-colors ${on
-                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-800 dark:text-emerald-300'
                   : 'bg-slate-200 dark:bg-zinc-800 border-slate-300 dark:border-zinc-700 text-fg-muted hover:border-slate-400 dark:hover:border-zinc-600'}`}
               >
                 {l.label}
@@ -606,7 +606,7 @@ function MetadataProfileForm({ profile, onClose, onSaved }: { profile?: Metadata
           {t('settings.metadata.formSkipPartBooks')}
         </label>
       </div>
-      {err && <div className="text-xs text-red-400">{err}</div>}
+      {err && <div className="text-xs text-red-700 dark:text-red-400">{err}</div>}
       <div className="flex justify-end gap-2">
         <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-fg-muted hover:text-slate-900 dark:hover:text-white">
           {t('common.cancel')}

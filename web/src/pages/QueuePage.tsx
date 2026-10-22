@@ -511,7 +511,7 @@ export default function QueuePage() {
                       <DownloadStatusChip status={item.status} />
                       <span className="text-fg-muted">{formatBytes(item.size)}</span>
                       {item.percentage && (
-                        <span className="text-blue-400">{item.percentage}%</span>
+                        <span className="text-blue-700 dark:text-blue-400">{item.percentage}%</span>
                       )}
                       {item.timeLeft && (
                         <span className="text-fg-muted">{t('queue.remaining', { time: item.timeLeft })}</span>
