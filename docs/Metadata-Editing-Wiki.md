@@ -53,12 +53,24 @@ Calibre import rollback. Rolling back an Audiobookshelf import undoes what its
 merge wrote, locked or not, as long as the field still holds the value the run
 wrote.
 
+## Edition locks
+
+An edition's publisher, publish date, ISBN-13, ISBN-10 and ASIN can be set
+and locked through `PUT /api/v1/book/{id}/edition/{editionId}`. Both the
+import upsert (Audiobookshelf, Calibre) and provider hydration keep a locked
+column's value, whether they would overwrite it or fill it. There is no
+edition editor in the UI; edition locks are API-only. `GET /api/v1/book/{id}`
+returns each edition's `lockedFields` when the book has editions. The PUT
+answers the stored edition, **404** when the edition is not this book's, and
+**409** with `reason: "changed"` when the edition changed since the request
+read it; read it again and resend.
+
 A re-bind to a different record also drops the editions the metadata provider
 listed for the old record, so their ISBNs no longer steer searches for the
 book. Editions created by the Calibre or Audiobookshelf import for your files
-are kept, and so is the edition you selected for the book and any edition a
-download or a Calibre delivery recorded. Re-binding to the record the book is
-already bound to changes no editions.
+are kept, and so is the edition you selected for the book, any edition with a
+locked field, and any edition a download or a Calibre delivery recorded.
+Re-binding to the record the book is already bound to changes no editions.
 
 ## What you cannot edit: an author's sort name
 
@@ -92,7 +104,9 @@ Both are idempotent; re-applying with a different list simply replaces it.
 `language`, `releaseDate`, `narrator`, `durationSeconds` and `asin`; setting
 one applies the value and locks the field. Send `lockedFields` (an array of
 those names) to replace the lock set explicitly; an empty array unlocks
-everything. Bulk endpoints:
+everything. `PUT /api/v1/book/{id}/edition/{editionId}` does the same for an
+edition with `publisher`, `publishDate` (`YYYY-MM-DD` or empty to clear),
+`isbn13`, `isbn10` and `asin`, and its own `lockedFields`. Bulk endpoints:
 `PUT /api/v1/author/{id}/genres` and `PUT /api/v1/series/{id}/genres` with
 `{"genres": ["Fantasy"]}`. `DELETE /api/v1/series/{id}/genres` removes a series
 override.
